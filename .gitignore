@@ -1,0 +1,5 @@
+/target/
+/.research/
+*.log
+*.bak
+logipro-backup-sector-*.bin
