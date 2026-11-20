@@ -1108,6 +1108,87 @@ pub fn set_onboard_report_rate(
     Ok(())
 }
 
+/// Saves `dpi` as the default DPI of the currently active user profile sector.
+/// If `dpi` already exists in the profile's 5 stages, selects that stage as default;
+/// otherwise updates the current default stage to `dpi`.
+pub fn patch_default_dpi_sector(
+    original: &[u8],
+    dpi: u16,
+    dpi_min: u16,
+    dpi_max: u16,
+) -> Result<Vec<u8>> {
+    if original.len() < 0x20 {
+        return Err(Error::Other("プロファイルセクタのサイズが不正です".into()));
+    }
+    if !crc_ok(original) {
+        return Err(Error::Other(
+            "現在のオンボードプロファイルのCRCが不正なため書き込みを中止しました".into(),
+        ));
+    }
+    if dpi < dpi_min || dpi > dpi_max {
+        return Err(Error::Other(format!(
+            "DPI {dpi} が対応範囲 ({dpi_min}〜{dpi_max}) 外です"
+        )));
+    }
+
+    let mut dpis = [0u16; 5];
+    for (i, slot) in dpis.iter_mut().enumerate() {
+        *slot = u16::from_le_bytes([original[3 + i * 2], original[4 + i * 2]]);
+    }
+
+    let new_default_idx = if let Some(existing) = dpis.iter().position(|&v| v == dpi) {
+        existing as u8
+    } else {
+        let idx = usize::from(original[1]).min(4);
+        dpis[idx] = dpi;
+        idx as u8
+    };
+
+    let mut patched = original.to_vec();
+    patched[1] = new_default_idx;
+    for (i, &v) in dpis.iter().enumerate() {
+        patched[3 + i * 2..5 + i * 2].copy_from_slice(&v.to_le_bytes());
+    }
+    let n = patched.len();
+    let crc = crc16_ccitt(&patched[..n - 2]);
+    patched[n - 2..n].copy_from_slice(&crc.to_be_bytes());
+    Ok(patched)
+}
+
+pub fn save_default_dpi_to_active_profile(
+    t: &Transport,
+    dev_idx: u8,
+    feat_idx: u8,
+    dpi: u16,
+    dpi_min: u16,
+    dpi_max: u16,
+) -> Result<()> {
+    let gi = t.request20(dev_idx, feat_idx, func::GET_INFO, &[], TIMEOUT)?;
+    let sector_size = u16::from_be_bytes([gi[7], gi[8]]);
+    let active_raw = t.request20(dev_idx, feat_idx, func::GET_ACTIVE_PROFILE, &[], TIMEOUT)?;
+    let active_sector = u16::from_be_bytes([active_raw[0], active_raw[1]]);
+    if active_sector == 0 || active_sector >= ROM_SECTOR_START {
+        return Err(Error::Other(
+            "有効なユーザープロファイルが選択されていないため初期DPIを保存できません".into(),
+        ));
+    }
+    let original = read_sector(t, dev_idx, feat_idx, active_sector, sector_size)?;
+    let patched = patch_default_dpi_sector(&original, dpi, dpi_min, dpi_max)?;
+    if patched != original {
+        save_backup(active_sector, &original)?;
+        write_sector_verified(t, dev_idx, feat_idx, active_sector, &patched, &original)?;
+    }
+    t.request20(
+        dev_idx,
+        feat_idx,
+        func::SET_ACTIVE_PROFILE,
+        &active_sector.to_be_bytes(),
+        TIMEOUT,
+    )?;
+    std::thread::sleep(SETTLE_DELAY);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1223,5 +1304,30 @@ mod tests {
         assert!(presets.iter().any(|p| p.raw == [0x80, 0x02, 0x00, 0x3E] && p.label == "キー: F5"));
         assert!(presets.iter().any(|p| p.raw == [0x80, 0x02, 0x00, 0x4B] && p.label == "キー: Page Up"));
         assert_eq!(format_key_combo(0x03, 0x17), "キー: Ctrl+Shift+T");
+    }
+
+    #[test]
+    fn patches_default_dpi_selecting_existing_or_replacing_default_slot() {
+        let mut s = vec![0xFFu8; 255];
+        s[0] = 1;
+        s[1] = 1; // default = 800
+        s[2] = 0;
+        for (i, d) in [400u16, 800, 1600, 3200, 6400].iter().enumerate() {
+            s[3 + i * 2..5 + i * 2].copy_from_slice(&d.to_le_bytes());
+        }
+        let crc = crc16_ccitt(&s[..253]);
+        s[253..255].copy_from_slice(&crc.to_be_bytes());
+
+        // Existing stage (1600 at index 2) -> switches default index without overwriting stages
+        let p1 = patch_default_dpi_sector(&s, 1600, 100, 25600).unwrap();
+        assert!(crc_ok(&p1));
+        assert_eq!(p1[1], 2);
+        assert_eq!(u16::from_le_bytes([p1[5], p1[6]]), 800);
+
+        // New custom value (1200) -> updates default slot 1 to 1200
+        let p2 = patch_default_dpi_sector(&s, 1200, 100, 25600).unwrap();
+        assert!(crc_ok(&p2));
+        assert_eq!(p2[1], 1);
+        assert_eq!(u16::from_le_bytes([p2[5], p2[6]]), 1200);
     }
 }

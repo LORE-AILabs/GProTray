@@ -603,6 +603,38 @@ impl MouseManager {
         Ok(snap)
     }
 
+    pub fn save_current_dpi_to_onboard(&mut self) -> Result<MouseSnapshot> {
+        let (tr, mut snap) = self.connected_target()?;
+        let dev_idx = snap.device_index;
+        let dpi_info = snap
+            .dpi
+            .as_ref()
+            .ok_or(Error::Unsupported(feature::ADJUSTABLE_DPI))?;
+        let current_dpi = dpi_info.current;
+        let (dpi_min, dpi_max) = (dpi_info.min, dpi_info.max);
+        let feat_idx = snap
+            .features
+            .get(&feature::ONBOARD_PROFILES)
+            .map(|f| f.index)
+            .ok_or(Error::Unsupported(feature::ONBOARD_PROFILES))?;
+
+        onboard::save_default_dpi_to_active_profile(
+            tr,
+            dev_idx,
+            feat_idx,
+            current_dpi,
+            dpi_min,
+            dpi_max,
+        )?;
+        let _ = restore_live_dpi(tr, dev_idx, &snap.features, current_dpi);
+
+        snap.warnings.clear();
+        snap.dpi = read_dpi(tr, dev_idx, &snap.features, &mut snap.warnings);
+        snap.onboard = Some(onboard::read_snapshot(tr, dev_idx, feat_idx)?);
+        self.last_connected = Some(snap.clone());
+        Ok(snap)
+    }
+
     pub fn clear_transports(&mut self) {
         self.transports.clear();
         self.last_connected = None;

@@ -57,6 +57,7 @@ const ID_AUTOSTART: usize = 1002;
 const ID_QUIT: usize = 1003;
 const ID_MODE_ONBOARD: usize = 1004;
 const ID_OPEN_EDITOR: usize = 1005;
+const ID_SAVE_DPI_ONBOARD: usize = 1006;
 
 const ID_DPI_BASE: usize = 2000;
 const ID_RATE_BASE: usize = 3000;
@@ -146,8 +147,9 @@ const RGB_PRESETS: &[(&str, LedEffect)] = &[
 ];
 
 enum WorkerCmd {
-    Rescan,
+    Rescan { reapply_preferred: bool },
     SetDpi(u16),
+    SaveDpiOnboard,
     SetReportRate(u32),
     SetProfile(u16),
     SetOnboardMode(bool),
@@ -463,6 +465,26 @@ fn show_context_menu(hwnd: HWND, snap: &MouseSnapshot, is_busy: bool) -> (MenuSe
                 };
                 append_text(sub, MF_STRING | checked, ID_DPI_BASE + i, &format!("{val} DPI"));
             }
+            if let Some(ob) = &snap.onboard {
+                if !ob.is_host_mode() {
+                    let active_user = ob
+                        .profiles
+                        .iter()
+                        .find(|p| !p.rom && p.sector == ob.active_sector);
+                    if let Some(p) = active_user {
+                        let ob_def = p.dpi_levels.get(usize::from(p.default_dpi_index)).copied();
+                        if ob_def != Some(dpi.current) {
+                            append_sep(sub);
+                            append_text(
+                                sub,
+                                MF_STRING,
+                                ID_SAVE_DPI_ONBOARD,
+                                &format!("現在のDPI ({}) をオンボード初期値に保存", dpi.current),
+                            );
+                        }
+                    }
+                }
+            }
             let title = str_to_utf16_z("DPI変更");
             unsafe { AppendMenuW(menu, MF_POPUP, sub as usize, title.as_ptr()) };
         } else {
@@ -770,10 +792,10 @@ fn spawn_worker(
                 }
                 busy.store(true, Ordering::SeqCst);
                 match cmd {
-                    WorkerCmd::Rescan => {
+                    WorkerCmd::Rescan { reapply_preferred } => {
                         let mut snap = mgr.scan_and_read();
                         let now_connected = snap.status == ConnectionStatus::Connected;
-                        if !was_connected && now_connected {
+                        if (reapply_preferred || !was_connected) && now_connected {
                             snap = apply_preferred_dpi_if_needed(
                                 &mut mgr,
                                 snap,
@@ -784,6 +806,45 @@ fn spawn_worker(
                             *guard = snap;
                         }
                         unsafe { PostMessageW(hwnd_raw as HWND, WM_STATE_UPDATED, 0, 0) };
+                    }
+                    WorkerCmd::SaveDpiOnboard => {
+                        let res = mgr.save_current_dpi_to_onboard();
+                        mark_write_settled(&suppress_hid_until);
+                        match res {
+                            Ok(snap) => {
+                                if let Some(dpi) = snap.dpi.as_ref().map(|d| d.current) {
+                                    save_preferred_dpi(dpi);
+                                }
+                                let dpi_txt = snap
+                                    .dpi
+                                    .as_ref()
+                                    .map(|d| d.current.to_string())
+                                    .unwrap_or_default();
+                                if let Ok(mut guard) = snapshot.lock() {
+                                    *guard = snap;
+                                }
+                                unsafe { PostMessageW(hwnd_raw as HWND, WM_STATE_UPDATED, 0, 0) };
+                                post_feedback(
+                                    hwnd_raw,
+                                    &pending_feedback,
+                                    true,
+                                    format!("現在のDPI ({dpi_txt}) をオンボード初期値に保存しました。"),
+                                );
+                            }
+                            Err(e) => {
+                                let snap = mgr.scan_and_read();
+                                if let Ok(mut guard) = snapshot.lock() {
+                                    *guard = snap;
+                                }
+                                unsafe { PostMessageW(hwnd_raw as HWND, WM_STATE_UPDATED, 0, 0) };
+                                post_feedback(
+                                    hwnd_raw,
+                                    &pending_feedback,
+                                    false,
+                                    format!("オンボード初期DPIの保存に失敗しました: {e}"),
+                                );
+                            }
+                        }
                     }
                     WorkerCmd::SetDpi(dpi) => {
                         let res = mgr.set_dpi(dpi);
@@ -1031,7 +1092,14 @@ fn handle_command(hwnd: HWND, cmd_id: usize) {
     match cmd_id {
         ID_REFRESH => {
             with_ctx(|ctx| {
-                let _ = ctx.cmd_tx.send(WorkerCmd::Rescan);
+                let _ = ctx
+                    .cmd_tx
+                    .send(WorkerCmd::Rescan { reapply_preferred: false });
+            });
+        }
+        ID_SAVE_DPI_ONBOARD => {
+            with_ctx(|ctx| {
+                let _ = ctx.cmd_tx.send(WorkerCmd::SaveDpiOnboard);
             });
         }
         ID_MODE_ONBOARD => {
@@ -1161,7 +1229,9 @@ unsafe extern "system" fn wnd_proc(
                 with_ctx(|ctx| {
                     ctx.selections = sel;
                     if cmd_id == 0 && !is_busy && snap.status == ConnectionStatus::Sleeping {
-                        let _ = ctx.cmd_tx.send(WorkerCmd::Rescan);
+                        let _ = ctx
+                            .cmd_tx
+                            .send(WorkerCmd::Rescan { reapply_preferred: true });
                     }
                 });
                 if cmd_id > 0 {
@@ -1235,7 +1305,9 @@ unsafe extern "system" fn wnd_proc(
         WM_TIMER => {
             KillTimer(hwnd, wparam);
             with_ctx(|ctx| {
-                let _ = ctx.cmd_tx.send(WorkerCmd::Rescan);
+                let _ = ctx
+                    .cmd_tx
+                    .send(WorkerCmd::Rescan { reapply_preferred: true });
             });
             0
         }
