@@ -26,4 +26,11 @@ cargo build --release --offline
 ## ライセンス・出典
 
 - 本体ライセンス: [MIT License](LICENSE)
-- 参照した MIT ライセンス OSS の帰属表記: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)
+- 参照した MIT ライセンス OSS の帰属表記・許諾表示: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)
+
+## 免責事項・商標について（Disclaimer & Trademarks）
+
+- 本ソフトウェアは個人開発の**非公式**ツールであり、Logitech Europe S.A. / 株式会社ロジクールとは一切関係ありません。公式サポートの対象外です。
+- `Logitech`、`Logicool`、`G PRO`、`G HUB`、`LIGHTSPEED` および各製品名は、Logitech Europe S.A. およびその関連会社の商標または登録商標です。
+- オンボードプロファイル編集や簡易RGB設定などはマウス内蔵フラッシュメモリへの書き込みを伴います。事前バックアップ（`%LOCALAPPDATA%\GProTray\backups\`）および CRC / 読み戻し検証を実装していますが、本ソフトウェアの使用により生じたいかなる損害についても作者は責任を負いません（[MIT License](LICENSE) に基づき無保証・自己責任でご利用ください）。
+
